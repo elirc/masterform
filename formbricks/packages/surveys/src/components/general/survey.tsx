@@ -1,0 +1,1244 @@
+import { type JSX } from "preact";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { SurveyContainerProps } from "@formbricks/types/formbricks-surveys";
+import { type TJsEnvironmentStateSurvey, TJsFileUploadParams } from "@formbricks/types/js";
+import type {
+  TResponseData,
+  TResponseTtc,
+  TResponseUpdate,
+  TResponseVariables,
+} from "@formbricks/types/responses";
+import { TUploadFileConfig } from "@formbricks/types/storage";
+import { TSurveyBlock, TSurveyBlockLogic } from "@formbricks/types/surveys/blocks";
+import { TSurveyElement } from "@formbricks/types/surveys/elements";
+import { BlockConditional } from "@/components/general/block-conditional";
+import { EndingCard } from "@/components/general/ending-card";
+import { ErrorComponent } from "@/components/general/error-component";
+import { FormbricksBranding } from "@/components/general/formbricks-branding";
+import { LanguageSwitch } from "@/components/general/language-switch";
+import { ProgressBar } from "@/components/general/progress-bar";
+import { RecaptchaBranding } from "@/components/general/recaptcha-branding";
+import { ResponseErrorComponent } from "@/components/general/response-error-component";
+import { SurveyCloseButton } from "@/components/general/survey-close-button";
+import { WelcomeCard } from "@/components/general/welcome-card";
+import { AutoCloseWrapper } from "@/components/wrappers/auto-close-wrapper";
+import { StackedCardsContainer } from "@/components/wrappers/stacked-cards-container";
+import { ApiClient } from "@/lib/api-client";
+import { evaluateLogic, performActions } from "@/lib/logic";
+import {
+  type SerializedSurveyState,
+  clearSurveyProgress,
+  getSurveyProgress,
+  patchSurveyProgressSnapshot,
+  saveSurveyProgress,
+} from "@/lib/offline-storage";
+import { parseRecallInformation } from "@/lib/recall";
+import { ResponseQueue } from "@/lib/response-queue";
+import { SurveyState } from "@/lib/survey-state";
+import { useOnlineStatus } from "@/lib/use-online-status";
+import { cn, findBlockByElementId, getDefaultLanguageCode, getElementsFromSurveyBlocks } from "@/lib/utils";
+import { TResponseErrorCodesEnum } from "@/types/response-error-codes";
+
+const restoreSurveyStateFromSnapshot = (
+  surveyState: SurveyState,
+  snapshot: SerializedSurveyState,
+  progress: {
+    responseData: TResponseData;
+    ttc: TResponseTtc;
+    currentVariables: TResponseVariables;
+  }
+): void => {
+  if (snapshot.responseId) surveyState.updateResponseId(snapshot.responseId);
+  if (snapshot.displayId) surveyState.updateDisplayId(snapshot.displayId);
+  if (snapshot.userId) surveyState.updateUserId(snapshot.userId);
+  if (snapshot.contactId) surveyState.updateContactId(snapshot.contactId);
+  if (snapshot.singleUseId) surveyState.singleUseId = snapshot.singleUseId;
+  surveyState.disableBootstrapResponseCreate();
+  surveyState.responseAcc = {
+    ...snapshot.responseAcc,
+    data: progress.responseData,
+    ttc: progress.ttc,
+    variables: progress.currentVariables,
+    displayId: snapshot.displayId ?? snapshot.responseAcc.displayId,
+  };
+};
+
+interface VariableStackEntry {
+  questionId: string;
+  variables: TResponseVariables;
+}
+
+export function Survey({
+  appUrl,
+  environmentId,
+  isPreviewMode = false,
+  userId,
+  contactId,
+  mode,
+  survey,
+  styling,
+  isBrandingEnabled,
+  onDisplay,
+  onResponse,
+  onClose,
+  onFinished,
+  onRetry,
+  onDisplayCreated,
+  onResponseCreated,
+  onOpenExternalURL,
+  isRedirectDisabled = false,
+  prefillResponseData,
+  skipPrefilled,
+  languageCode,
+  getSetIsError,
+  getSetIsResponseSendingFinished,
+  getSetBlockId,
+  getSetResponseData,
+  responseCount,
+  startAtQuestionId,
+  hiddenFieldsRecord,
+  shouldResetQuestionId,
+  fullSizeCards = false,
+  autoFocus,
+  action,
+  singleUseId,
+  singleUseResponseId,
+  isWebEnvironment = true,
+  getRecaptchaToken,
+  isSpamProtectionEnabled,
+  dir = "auto",
+  setDir,
+  placement,
+  offlineSupport = false,
+  onOfflineStatusChange,
+}: SurveyContainerProps) {
+  let apiClient: ApiClient | null = null;
+
+  if (appUrl && environmentId) {
+    apiClient = new ApiClient({
+      appUrl,
+      environmentId,
+    });
+  }
+
+  const surveyState = useMemo(() => {
+    if (appUrl && environmentId) {
+      if (mode === "inline") {
+        return new SurveyState(survey.id, singleUseId, singleUseResponseId, userId, contactId);
+      }
+
+      return new SurveyState(survey.id, null, null, userId, contactId);
+    }
+    return null;
+  }, [appUrl, environmentId, mode, survey.id, userId, singleUseId, singleUseResponseId, contactId]);
+
+  // Update the responseQueue to use the stored responseId
+
+  const [hasInteracted, setHasInteracted] = useState(false);
+
+  const [localSurvey, setlocalSurvey] = useState<TJsEnvironmentStateSurvey>(survey);
+  const [currentVariables, setCurrentVariables] = useState<TResponseVariables>({});
+
+  const isLinkSurvey = survey.type === "link";
+  const offlinePersistEnabled =
+    offlineSupport && isLinkSurvey && !isPreviewMode && !!appUrl && !!environmentId;
+
+  const persistSurveyStateSnapshot = useCallback(
+    async (snapshotPatch: Partial<SerializedSurveyState>) => {
+      if (!offlinePersistEnabled) return;
+      await patchSurveyProgressSnapshot(survey.id, snapshotPatch);
+    },
+    [offlinePersistEnabled, survey.id]
+  );
+
+  const responseQueue = useMemo(() => {
+    if (appUrl && environmentId && surveyState) {
+      return new ResponseQueue(
+        {
+          appUrl,
+          environmentId,
+          retryAttempts: 4,
+          persistOffline: offlinePersistEnabled,
+          surveyId: survey.id,
+          onResponseSendingFailed: (_, errorCode?: TResponseErrorCodesEnum) => {
+            setShowError(true);
+            setErrorType(errorCode);
+
+            if (getSetIsError) {
+              getSetIsError((_prev) => {});
+            }
+          },
+          onResponseSendingFinished: () => {
+            setIsResponseSendingFinished(true);
+            setShowError(false);
+            setErrorType(undefined);
+
+            if (getSetIsResponseSendingFinished) {
+              getSetIsResponseSendingFinished((_prev) => {});
+            }
+          },
+          onQuotaFull: (quotaInfo) => {
+            if (quotaInfo.action === "endSurvey") {
+              setIsResponseSendingFinished(true);
+              setIsSurveyFinished(true);
+              setBlockId(quotaInfo.endingCardId);
+            }
+          },
+          onResponseCreated: (responseId) => {
+            void persistSurveyStateSnapshot({ responseId });
+          },
+        },
+        surveyState
+      );
+    }
+
+    return null;
+  }, [
+    appUrl,
+    environmentId,
+    getSetIsError,
+    getSetIsResponseSendingFinished,
+    surveyState,
+    offlinePersistEnabled,
+    persistSurveyStateSnapshot,
+    survey.id,
+  ]);
+
+  const questions = useMemo(() => getElementsFromSurveyBlocks(localSurvey.blocks), [localSurvey.blocks]);
+
+  const originalQuestionRequiredStates = useMemo(() => {
+    return questions.reduce<Record<string, boolean>>((acc, question) => {
+      acc[question.id] = question.required;
+      return acc;
+    }, {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only recompute when blocks structure changes
+  }, [survey.blocks]);
+
+  // state to keep track of the questions that were made required by each specific question's logic
+  const questionRequiredByMap = useRef<Record<string, string[]>>({});
+
+  // Update localSurvey when the survey prop changes (it changes in case of survey editor)
+  useEffect(() => {
+    setlocalSurvey(survey);
+  }, [survey]);
+
+  useEffect(() => {
+    setCurrentVariables(
+      survey.variables.reduce<TResponseVariables>((acc, variable) => {
+        acc[variable.id] = variable.value;
+        return acc;
+      }, {})
+    );
+  }, [survey.variables]);
+
+  const autoFocusEnabled = autoFocus ?? window.self === window.top;
+
+  // Block-based navigation: track current block ID instead of question ID
+  const [blockId, setBlockId] = useState(() => {
+    if (startAtQuestionId) {
+      // If starting at a specific question, find its parent block
+      const startBlock = findBlockByElementId(localSurvey.blocks, startAtQuestionId);
+      return startBlock?.id || localSurvey.blocks[0]?.id;
+    } else if (localSurvey.welcomeCard.enabled) {
+      return "start";
+    }
+
+    return localSurvey.blocks[0]?.id;
+  });
+
+  const [errorType, setErrorType] = useState<TResponseErrorCodesEnum | undefined>(undefined);
+  const [showError, setShowError] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [isResponseSendingFinished, setIsResponseSendingFinished] = useState(
+    !getSetIsResponseSendingFinished
+  );
+  const [isSurveyFinished, setIsSurveyFinished] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState(languageCode);
+  const [loadingElement, setLoadingElement] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
+  const isNavigatingBackRef = useRef(false);
+  const [responseData, setResponseData] = useState<TResponseData>(hiddenFieldsRecord ?? {});
+  const [_variableStack, setVariableStack] = useState<VariableStackEntry[]>([]);
+
+  const [ttc, setTtc] = useState<TResponseTtc>({});
+  const isOnline = useOnlineStatus();
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [progressRestored, setProgressRestored] = useState(!offlinePersistEnabled);
+
+  // Notify parent of offline status changes (for rendering alert in the React layer)
+  useEffect(() => {
+    onOfflineStatusChange?.({ isOnline, isSyncing, pendingSyncCount });
+  }, [isOnline, isSyncing, pendingSyncCount, onOfflineStatusChange]);
+
+  const cardArrangement = useMemo(() => {
+    if (localSurvey.type === "link") {
+      return styling.cardArrangement?.linkSurveys ?? "straight";
+    }
+    return styling.cardArrangement?.appSurveys ?? "straight";
+  }, [localSurvey.type, styling.cardArrangement?.linkSurveys, styling.cardArrangement?.appSurveys]);
+
+  // Current block tracking (replaces currentQuestionIndex)
+  const currentBlockIndex = localSurvey.blocks.findIndex((b) => b.id === blockId);
+  const currentBlock = localSurvey.blocks[currentBlockIndex];
+
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const showProgressBar = !styling.hideProgressBar;
+  const getShowSurveyCloseButton = (offset: number) => {
+    return offset === 0 && localSurvey.type !== "link";
+  };
+  const enabledLanguages = localSurvey.languages.filter((lang) => lang.enabled);
+  const getShowLanguageSwitch = (offset: number) => {
+    return localSurvey.showLanguageSwitch && enabledLanguages.length > 1 && offset <= 0;
+  };
+
+  const onFileUpload = async (file: TJsFileUploadParams["file"], params?: TUploadFileConfig) => {
+    if (isPreviewMode) {
+      // return mock url since an url is required for the preview
+      return `https://example.com/${file.name}`;
+    }
+
+    if (!apiClient) {
+      throw new Error("apiClient not initialized");
+    }
+
+    const response = await apiClient.uploadFile(
+      {
+        type: file.type,
+        name: file.name,
+        base64: file.base64,
+      },
+      params
+    );
+
+    return response;
+  };
+
+  useEffect(() => {
+    // scroll to top when block changes
+    if (contentRef.current) {
+      contentRef.current.scrollTop = 0;
+    }
+  }, [blockId]);
+
+  const createDisplay = useCallback(async () => {
+    // Skip display creation in preview mode but still trigger the onDisplayCreated callback
+    if (isPreviewMode) {
+      if (onDisplayCreated) {
+        onDisplayCreated();
+      }
+      if (onDisplay) {
+        onDisplay();
+      }
+      return;
+    }
+
+    if (apiClient && surveyState && responseQueue) {
+      try {
+        const display = await apiClient.createDisplay({
+          surveyId: survey.id,
+          ...(userId && { userId }),
+          ...(contactId && { contactId }),
+        });
+
+        if (!display.ok) {
+          // @ts-expect-error -- display.error is of type ApiErrorResponse
+          throw new Error(display.error);
+        }
+
+        surveyState.updateDisplayId(display.data.id);
+        responseQueue.updateSurveyState(surveyState);
+        await persistSurveyStateSnapshot({ displayId: display.data.id });
+
+        if (onDisplayCreated) {
+          onDisplayCreated();
+        }
+      } catch (err) {
+        console.error("error creating display: ", err);
+      }
+    }
+  }, [
+    apiClient,
+    surveyState,
+    responseQueue,
+    survey.id,
+    userId,
+    contactId,
+    onDisplayCreated,
+    isPreviewMode,
+    onDisplay,
+    persistSurveyStateSnapshot,
+  ]);
+
+  // Create display on mount. When offline persistence is enabled, wait for progress
+  // restoration so we can skip creating a new display if a session was restored.
+  const displayCreatedRef = useRef(false);
+
+  useEffect(() => {
+    if (offlinePersistEnabled && !progressRestored) return;
+
+    // If we restored a session that already has a displayId, skip creating a new one.
+    if (offlinePersistEnabled && surveyState?.displayId) {
+      displayCreatedRef.current = true;
+      return;
+    }
+
+    if (displayCreatedRef.current) return;
+    displayCreatedRef.current = true;
+
+    if (appUrl && environmentId) {
+      createDisplay();
+    } else {
+      onDisplay?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once, or once after restore for offline
+  }, [progressRestored]);
+
+  useEffect(() => {
+    if (getSetIsError) {
+      getSetIsError((value: boolean) => {
+        setShowError(value);
+      });
+    }
+  }, [getSetIsError]);
+
+  useEffect(() => {
+    if (getSetBlockId) {
+      getSetBlockId((value: string) => {
+        setBlockId(value);
+      });
+    }
+  }, [getSetBlockId]);
+
+  useEffect(() => {
+    if (getSetResponseData) {
+      getSetResponseData((value: TResponseData) => {
+        setResponseData(value);
+      });
+    }
+  }, [getSetResponseData]);
+
+  useEffect(() => {
+    if (getSetIsResponseSendingFinished) {
+      getSetIsResponseSendingFinished((value: boolean) => {
+        setIsResponseSendingFinished(value);
+      });
+    }
+  }, [getSetIsResponseSendingFinished]);
+
+  useEffect(() => {
+    setSelectedLanguage(languageCode);
+  }, [languageCode]);
+
+  // --- Offline support: restore progress from IndexedDB on mount ---
+  useEffect(() => {
+    if (!offlinePersistEnabled) return;
+
+    let cancelled = false;
+
+    const restore = async () => {
+      const progress = await getSurveyProgress(survey.id);
+
+      if (cancelled || !progress) {
+        setProgressRestored(true);
+        return;
+      }
+
+      // Discard stale progress (older than 24 hours)
+      const MAX_AGE_MS = 24 * 60 * 60 * 1000;
+      if (Date.now() - progress.updatedAt > MAX_AGE_MS) {
+        await clearSurveyProgress(survey.id);
+        setProgressRestored(true);
+        return;
+      }
+
+      // Check pending responses first — this determines whether the survey is truly complete.
+      const pendingCount = responseQueue ? await responseQueue.loadPersistedQueue() : 0;
+
+      // If the survey is fully complete (no pending responses + finished), discard stale
+      // progress and start fresh instead of restoring to the ending card.
+      if (pendingCount === 0) {
+        const isEndingCard = localSurvey.endings.some((e) => e.id === progress.blockId);
+        const isResponseFinished = progress.surveyStateSnapshot?.responseAcc?.finished === true;
+
+        if (isEndingCard || isResponseFinished) {
+          await clearSurveyProgress(survey.id);
+          setProgressRestored(true);
+          return;
+        }
+      }
+
+      if (pendingCount > 0) {
+        setPendingSyncCount(pendingCount);
+      }
+
+      // Validate that the saved blockId still exists in the current survey
+      const blockExists =
+        progress.blockId === "start" ||
+        progress.blockId === "end" ||
+        localSurvey.blocks.some((b) => b.id === progress.blockId) ||
+        localSurvey.endings.some((e) => e.id === progress.blockId);
+
+      if (blockExists) {
+        setBlockId(progress.blockId);
+        setResponseData(progress.responseData);
+        setTtc(progress.ttc);
+        setCurrentVariables(progress.currentVariables);
+        setHistory(progress.history);
+        setSelectedLanguage(progress.selectedLanguage);
+
+        // Restore survey state from snapshot
+        if (surveyState && progress.surveyStateSnapshot) {
+          restoreSurveyStateFromSnapshot(surveyState, progress.surveyStateSnapshot, progress);
+
+          if (pendingCount === 0 && !progress.surveyStateSnapshot.responseId) {
+            if (progress.surveyStateSnapshot.displayId && apiClient) {
+              const responseLookup = await apiClient.getResponseIdByDisplayId(
+                progress.surveyStateSnapshot.displayId
+              );
+
+              if (responseLookup.ok && responseLookup.data.responseId) {
+                surveyState.updateResponseId(responseLookup.data.responseId);
+                await persistSurveyStateSnapshot({ responseId: responseLookup.data.responseId });
+              } else if (responseLookup.ok) {
+                surveyState.enableBootstrapResponseCreate();
+              } else if (responseLookup.error.status === 404) {
+                surveyState.updateDisplayId(null);
+                surveyState.enableBootstrapResponseCreate();
+                await persistSurveyStateSnapshot({ displayId: null });
+              } else {
+                console.error("Formbricks: Failed to recover responseId from displayId", {
+                  displayId: progress.surveyStateSnapshot.displayId,
+                  error: responseLookup.error,
+                });
+                surveyState.enableBootstrapResponseCreate();
+              }
+            } else {
+              surveyState.enableBootstrapResponseCreate();
+            }
+          }
+
+          responseQueue?.updateSurveyState(surveyState);
+        }
+      } else {
+        // Block no longer exists (survey structure changed) — discard UI progress
+        // but still restore survey state and sync pending responses below.
+        await clearSurveyProgress(survey.id);
+
+        if (surveyState && progress.surveyStateSnapshot) {
+          restoreSurveyStateFromSnapshot(surveyState, progress.surveyStateSnapshot, progress);
+          responseQueue?.updateSurveyState(surveyState);
+        }
+      }
+
+      setProgressRestored(true);
+    };
+
+    void restore();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- should only run on mount
+  }, []);
+
+  // --- Offline support: save progress to IndexedDB on submit (see onSubmit) ---
+
+  // --- Offline support: sync pending responses when coming back online ---
+  const isSyncingRef = useRef(false);
+
+  useEffect(() => {
+    if (!offlinePersistEnabled || !responseQueue || !progressRestored) return;
+
+    // Reset the guard when going offline so a new sync can start next time we're online
+    if (!isOnline) {
+      isSyncingRef.current = false;
+      return;
+    }
+
+    // Prevent duplicate syncs from re-renders while a sync is already in progress
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
+
+    const syncPending = async () => {
+      try {
+        const count = await responseQueue.getPendingCount();
+        if (count === 0) return;
+
+        setIsSyncing(true);
+        setPendingSyncCount(count);
+
+        const result = await responseQueue.syncPersistedResponses((synced, total) => {
+          setPendingSyncCount(total - synced);
+        });
+
+        setIsSyncing(false);
+        setPendingSyncCount(0);
+
+        if (result.syncedCount > 0) {
+          console.log(`Formbricks: Synced ${result.syncedCount} offline response(s)`);
+        }
+
+        // Clean up IndexedDB and mark sending as finished after successful sync
+        // Individual entries are already removed from IndexedDB inside syncPersistedResponses.
+        // Don't use clearPendingResponses here — it would wipe entries added during the async sync.
+        if (result.success) {
+          await clearSurveyProgress(survey.id);
+
+          if (result.syncedCount > 0) {
+            setIsResponseSendingFinished(true);
+          }
+        }
+      } finally {
+        isSyncingRef.current = false;
+      }
+    };
+
+    void syncPending();
+  }, [isOnline, offlinePersistEnabled, responseQueue, progressRestored, survey.id]);
+
+  // --- Warn before leaving mid-survey or with unsent offline responses ---
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      // Warn if user has started answering but hasn't finished the survey (only when offline support is active)
+      if (offlinePersistEnabled && history.length > 0 && !isSurveyFinished) {
+        e.preventDefault();
+        return;
+      }
+      // Warn if there are unsent offline responses
+      if (
+        offlinePersistEnabled &&
+        responseQueue &&
+        (responseQueue.queue.length > 0 || pendingSyncCount > 0)
+      ) {
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [history.length, isSurveyFinished, offlinePersistEnabled, responseQueue, pendingSyncCount]);
+
+  const onChange = (responseDataUpdate: TResponseData) => {
+    const updatedResponseData = { ...responseData, ...responseDataUpdate };
+    setResponseData(updatedResponseData);
+  };
+
+  const onChangeVariables = (variables: TResponseVariables) => {
+    const updatedVariables = { ...currentVariables, ...variables };
+    setCurrentVariables(updatedVariables);
+  };
+
+  const makeQuestionsRequired = (requiredQuestionIds: string[]): void => {
+    const updateElementIfRequired = (element: TSurveyElement) => {
+      if (requiredQuestionIds.includes(element.id)) {
+        return { ...element, required: true };
+      }
+      return element;
+    };
+
+    const updateBlockElements = (block: TSurveyBlock) => ({
+      ...block,
+      elements: block.elements.map(updateElementIfRequired),
+    });
+
+    setlocalSurvey((prevSurvey) => ({
+      ...prevSurvey,
+      blocks: prevSurvey.blocks.map(updateBlockElements),
+    }));
+  };
+
+  const revertRequiredChangesByQuestion = (questionId: string): void => {
+    const questionsToRevert = questionRequiredByMap.current[questionId] || [];
+
+    if (questionsToRevert.length > 0) {
+      const revertElementIfNeeded = (element: TSurveyElement) => {
+        if (questionsToRevert.includes(element.id)) {
+          return {
+            ...element,
+            required: originalQuestionRequiredStates[element.id] ?? element.required,
+          };
+        }
+        return element;
+      };
+
+      const updateBlockElements = (block: TSurveyBlock) => ({
+        ...block,
+        elements: block.elements.map(revertElementIfNeeded),
+      });
+
+      setlocalSurvey((prevSurvey) => ({
+        ...prevSurvey,
+        blocks: prevSurvey.blocks.map(updateBlockElements),
+      }));
+
+      // remove the question from the map
+      delete questionRequiredByMap.current[questionId];
+    }
+  };
+
+  const pushVariableState = (currentQuestionId: string) => {
+    setVariableStack((prevStack) => [
+      ...prevStack,
+      { questionId: currentQuestionId, variables: { ...currentVariables } },
+    ]);
+  };
+
+  const popVariableState = () => {
+    setVariableStack((prevStack) => {
+      const newStack = [...prevStack];
+      const poppedState = newStack.pop();
+      if (poppedState) {
+        setCurrentVariables(poppedState.variables);
+      }
+      return newStack;
+    });
+  };
+
+  const evaluateLogicAndGetNextBlockId = (
+    data: TResponseData
+  ): { nextBlockId: string | undefined; calculatedVariables: TResponseVariables } => {
+    const firstEndingId = survey.endings.length > 0 ? survey.endings[0].id : undefined;
+
+    if (blockId === "start")
+      return {
+        nextBlockId: localSurvey.blocks[0]?.id || firstEndingId,
+        calculatedVariables: {},
+      };
+
+    if (!currentBlock) {
+      console.error(
+        "Block not found. blockId:",
+        blockId,
+        "available blocks:",
+        localSurvey.blocks.map((b) => b.id)
+      );
+      throw new Error("Block not found");
+    }
+
+    const localResponseData = { ...responseData, ...data };
+    let calculationResults = { ...currentVariables };
+
+    // Process a single logic rule
+    const processLogicRule = (
+      logic: TSurveyBlockLogic,
+      currentJumpTarget: string | undefined,
+      currentRequiredIds: string[]
+    ): { jumpTarget: string | undefined; requiredIds: string[]; updatedCalculations: TResponseVariables } => {
+      const isLogicMet = evaluateLogic(
+        localSurvey,
+        localResponseData,
+        calculationResults,
+        logic.conditions,
+        selectedLanguage
+      );
+
+      if (!isLogicMet) {
+        return {
+          jumpTarget: currentJumpTarget,
+          requiredIds: currentRequiredIds,
+          updatedCalculations: calculationResults,
+        };
+      }
+
+      const { jumpTarget, requiredQuestionIds, calculations } = performActions(
+        localSurvey,
+        logic.actions,
+        localResponseData,
+        calculationResults
+      );
+
+      const newJumpTarget = jumpTarget && !currentJumpTarget ? jumpTarget : currentJumpTarget;
+      const newRequiredIds = [...currentRequiredIds, ...requiredQuestionIds];
+      const updatedCalculations = { ...calculationResults, ...calculations };
+
+      return {
+        jumpTarget: newJumpTarget,
+        requiredIds: newRequiredIds,
+        updatedCalculations,
+      };
+    };
+
+    // Evaluate block-level logic
+    const evaluateBlockLogic = () => {
+      let firstJumpTarget: string | undefined;
+      const allRequiredQuestionIds: string[] = [];
+
+      if (currentBlock.logic && currentBlock.logic.length > 0) {
+        for (const logic of currentBlock.logic) {
+          const result = processLogicRule(logic, firstJumpTarget, allRequiredQuestionIds);
+          firstJumpTarget = result.jumpTarget;
+          allRequiredQuestionIds.length = 0;
+          allRequiredQuestionIds.push(...result.requiredIds);
+          calculationResults = result.updatedCalculations;
+        }
+      }
+
+      // Use logicFallback if no jump target was set
+      if (!firstJumpTarget && currentBlock.logicFallback) {
+        firstJumpTarget = currentBlock.logicFallback;
+      }
+
+      return { firstJumpTarget, allRequiredQuestionIds };
+    };
+
+    const { firstJumpTarget, allRequiredQuestionIds } = evaluateBlockLogic();
+
+    // Handle required questions
+    const handleRequiredQuestions = (requiredIds: string[]) => {
+      if (requiredIds.length > 0) {
+        if (currentBlock.elements[0]) {
+          questionRequiredByMap.current[currentBlock.elements[0].id] = requiredIds;
+        }
+        makeQuestionsRequired(requiredIds);
+      }
+    };
+
+    handleRequiredQuestions(allRequiredQuestionIds);
+
+    // Return the jump target (which is a block ID) or the next block in sequence
+    const nextBlockId = firstJumpTarget || localSurvey.blocks[currentBlockIndex + 1]?.id;
+
+    return {
+      nextBlockId,
+      calculatedVariables: calculationResults,
+    };
+  };
+
+  const getWebSurveyMeta = useCallback(() => {
+    if (!isWebEnvironment) return {};
+
+    const url = new URL(window.location.href);
+    const source = url.searchParams.get("source");
+
+    return {
+      url: url.href,
+      ...(source ? { source } : {}),
+    };
+  }, [isWebEnvironment]);
+
+  const onResponseCreateOrUpdate = useCallback(
+    async (responseUpdate: TResponseUpdate) => {
+      // Always trigger the onResponse callback even in preview mode
+      if (!appUrl || !environmentId) {
+        onResponse?.({
+          data: responseUpdate.data,
+          ttc: responseUpdate.ttc,
+          finished: responseUpdate.finished,
+          variables: responseUpdate.variables,
+          language: responseUpdate.language,
+          endingId: responseUpdate.endingId,
+        });
+        return;
+      }
+
+      // Skip response creation in preview mode but still trigger the onResponseCreated callback
+      if (isPreviewMode) {
+        onResponseCreated?.();
+
+        // When in preview mode, set isResponseSendingFinished to true if the response is finished
+        if (responseUpdate.finished) {
+          setIsResponseSendingFinished(true);
+        }
+        return;
+      }
+
+      if (surveyState && responseQueue) {
+        if (contactId) {
+          surveyState.updateContactId(contactId);
+        }
+
+        if (userId) {
+          surveyState.updateUserId(userId);
+        }
+
+        responseQueue.updateSurveyState(surveyState);
+        responseQueue.add({
+          data: responseUpdate.data,
+          ttc: responseUpdate.ttc,
+          finished: responseUpdate.finished,
+          language:
+            responseUpdate.language === "default" ? getDefaultLanguageCode(survey) : responseUpdate.language,
+          meta: {
+            ...getWebSurveyMeta(),
+            action,
+          },
+          variables: responseUpdate.variables,
+          displayId: surveyState.displayId,
+          endingId: responseUpdate.endingId,
+          hiddenFields: hiddenFieldsRecord,
+        });
+
+        onResponseCreated?.();
+      }
+    },
+    [
+      appUrl,
+      environmentId,
+      isPreviewMode,
+      surveyState,
+      responseQueue,
+      onResponse,
+      onResponseCreated,
+      contactId,
+      userId,
+      survey,
+      action,
+      hiddenFieldsRecord,
+      getWebSurveyMeta,
+    ]
+  );
+
+  useEffect(() => {
+    if (isPreviewMode || !survey.recaptcha?.enabled) return;
+
+    if (!isSpamProtectionEnabled) {
+      setShowError(true);
+      setErrorType(TResponseErrorCodesEnum.InvalidDeviceError);
+    }
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- this is a one-time effect
+  }, []);
+
+  // When offline with persistence, the response is safely stored in IndexedDB.
+  // Mark it as "sending finished" for the UI (ending card) without triggering cleanup.
+  useEffect(() => {
+    if (offlinePersistEnabled && !isOnline && isSurveyFinished && !isResponseSendingFinished) {
+      setIsResponseSendingFinished(true);
+    }
+  }, [offlinePersistEnabled, isOnline, isSurveyFinished, isResponseSendingFinished]);
+
+  useEffect(() => {
+    if (isResponseSendingFinished && isSurveyFinished) {
+      // Post a message to the parent window indicating that the survey is completed.
+      window.parent.postMessage("formbricksSurveyCompleted", "*"); // NOSONAR typescript:S2819 // We can't check the targetOrigin here because we don't know the parent window's origin.
+      onFinished?.();
+    }
+  }, [isResponseSendingFinished, isSurveyFinished, onFinished]);
+
+  const onSubmit = async (surveyResponseData: TResponseData, responsettc: TResponseTtc) => {
+    isNavigatingBackRef.current = false;
+
+    // Get the first responded element ID for tracking
+    const respondedElementIds = Object.keys(surveyResponseData);
+    const firstRespondedElementId = respondedElementIds[0];
+
+    setLoadingElement(true);
+
+    if (isSpamProtectionEnabled && !surveyState?.responseId && getRecaptchaToken) {
+      const token = await getRecaptchaToken();
+      if (responseQueue && token) {
+        responseQueue.setResponseRecaptchaToken(token);
+      } else {
+        setShowError(true);
+        setErrorType(TResponseErrorCodesEnum.RecaptchaError);
+        setLoadingElement(false);
+        return;
+      }
+    }
+
+    pushVariableState(firstRespondedElementId);
+
+    const { nextBlockId, calculatedVariables } = evaluateLogicAndGetNextBlockId(surveyResponseData);
+    const finished =
+      nextBlockId === undefined || !localSurvey.blocks.map((block) => block.id).includes(nextBlockId);
+
+    setIsSurveyFinished(finished);
+
+    const endingId = nextBlockId
+      ? localSurvey.endings.find((ending) => ending.id === nextBlockId)?.id
+      : undefined;
+
+    onChange(surveyResponseData);
+    onChangeVariables(calculatedVariables);
+
+    onResponseCreateOrUpdate({
+      data: surveyResponseData,
+      ttc: responsettc,
+      finished,
+      variables: calculatedVariables,
+      language: selectedLanguage,
+      endingId,
+    });
+
+    if (nextBlockId) {
+      setBlockId(nextBlockId);
+    } else if (finished) {
+      // Survey is finished, show the first ending or set to a value > blocks.length
+      const firstEndingId = localSurvey.endings[0]?.id as string | undefined;
+      if (firstEndingId) {
+        setBlockId(firstEndingId);
+      } else {
+        // No endings defined, set blockId to trigger ending screen
+        setBlockId("end");
+      }
+    }
+    // add current block to history
+    const newHistory = [...history, blockId];
+    setHistory(newHistory);
+
+    // --- Offline support: save progress on each submit ---
+    if (offlinePersistEnabled) {
+      const newBlockId = finished ? endingId || localSurvey.endings[0]?.id || "end" : nextBlockId || blockId;
+
+      void saveSurveyProgress({
+        surveyId: survey.id,
+        blockId: newBlockId,
+        responseData: { ...responseData, ...surveyResponseData },
+        ttc: { ...ttc, ...responsettc },
+        currentVariables: calculatedVariables,
+        history: newHistory,
+        selectedLanguage,
+        surveyStateSnapshot: {
+          responseId: surveyState?.responseId ?? null,
+          displayId: surveyState?.displayId ?? null,
+          surveyId: survey.id,
+          singleUseId: surveyState?.singleUseId ?? null,
+          userId: surveyState?.userId ?? null,
+          contactId: surveyState?.contactId ?? null,
+          responseAcc: surveyState?.responseAcc ?? { finished: false, data: {}, ttc: {}, variables: {} },
+        },
+        updatedAt: Date.now(),
+      });
+    }
+
+    setLoadingElement(false);
+  };
+
+  const onBack = (): void => {
+    isNavigatingBackRef.current = true;
+
+    let prevBlockId: string | undefined;
+    // use history if available
+    if (history.length > 0) {
+      const newHistory = [...history];
+      prevBlockId = newHistory.pop();
+      setHistory(newHistory);
+    } else {
+      // otherwise go back to previous block in array
+      prevBlockId = localSurvey.blocks[currentBlockIndex - 1]?.id;
+    }
+    popVariableState();
+    if (!prevBlockId) throw new Error("Block not found");
+
+    // Revert required changes by the first element in the previous block
+    const prevBlock = localSurvey.blocks.find((b) => b.id === prevBlockId);
+    if (prevBlock?.elements[0]) {
+      revertRequiredChangesByQuestion(prevBlock.elements[0].id);
+    }
+
+    setBlockId(prevBlockId);
+  };
+
+  const retryResponse = async () => {
+    if (responseQueue) {
+      setIsRetrying(true);
+      const result = await responseQueue.processQueue();
+      setIsRetrying(false);
+
+      if (result.success) {
+        setShowError(false);
+        setErrorType(undefined);
+      }
+    } else {
+      onRetry?.();
+    }
+  };
+
+  const getCardContent = (blockIdx: number, offset: number): JSX.Element | undefined => {
+    if (showError) {
+      switch (errorType) {
+        case TResponseErrorCodesEnum.ResponseSendingError:
+          return (
+            <ResponseErrorComponent
+              responseData={responseQueue?.getUnsentData() ?? responseData}
+              questions={questions}
+              onRetry={retryResponse}
+              isRetrying={isRetrying}
+            />
+          );
+        case TResponseErrorCodesEnum.RecaptchaError:
+        case TResponseErrorCodesEnum.InvalidDeviceError:
+          return (
+            <>
+              {localSurvey.type !== "link" ? (
+                <div className="bg-survey-bg flex h-6 justify-end pt-2 pr-2">
+                  <SurveyCloseButton onClose={onClose} />
+                </div>
+              ) : null}
+              <ErrorComponent errorType={errorType} />
+            </>
+          );
+      }
+    }
+
+    const content = () => {
+      if (blockIdx === -1) {
+        return (
+          <WelcomeCard
+            key="start"
+            headline={localSurvey.welcomeCard.headline}
+            subheader={localSurvey.welcomeCard.subheader}
+            fileUrl={localSurvey.welcomeCard.fileUrl}
+            videoUrl={localSurvey.welcomeCard.videoUrl}
+            buttonLabel={localSurvey.welcomeCard.buttonLabel}
+            onSubmit={onSubmit}
+            survey={localSurvey}
+            languageCode={selectedLanguage}
+            responseCount={responseCount}
+            autoFocusEnabled={autoFocusEnabled}
+            isCurrent={offset === 0}
+            responseData={responseData}
+            variablesData={currentVariables}
+            isPreviewMode={isPreviewMode}
+            fullSizeCards={fullSizeCards}
+          />
+        );
+      } else if (blockIdx >= localSurvey.blocks.length) {
+        const endingCard = localSurvey.endings.find((ending) => {
+          return ending.id === blockId;
+        });
+        if (endingCard) {
+          return (
+            <EndingCard
+              survey={localSurvey}
+              endingCard={endingCard}
+              isRedirectDisabled={isRedirectDisabled}
+              autoFocusEnabled={autoFocusEnabled}
+              isCurrent={offset === 0}
+              languageCode={selectedLanguage}
+              isResponseSendingFinished={isResponseSendingFinished}
+              responseData={responseData}
+              variablesData={currentVariables}
+              onOpenExternalURL={onOpenExternalURL}
+              isPreviewMode={isPreviewMode}
+              fullSizeCards={fullSizeCards}
+              isOfflineWithPending={offlinePersistEnabled && !isOnline && isSurveyFinished}
+            />
+          );
+        }
+      } else {
+        const block = localSurvey.blocks[blockIdx];
+        return (
+          Boolean(block) && (
+            <BlockConditional
+              surveyLanguages={localSurvey.languages}
+              key={block.id}
+              surveyId={localSurvey.id}
+              block={{
+                ...block,
+                elements: block.elements.map((element) =>
+                  parseRecallInformation(element, selectedLanguage, responseData, currentVariables)
+                ),
+              }}
+              value={responseData}
+              onChange={onChange}
+              onSubmit={onSubmit}
+              onBack={onBack}
+              ttc={ttc}
+              setTtc={setTtc}
+              onFileUpload={onFileUpload}
+              isFirstBlock={block.id === localSurvey.blocks[0]?.id}
+              skipPrefilled={skipPrefilled && !isNavigatingBackRef.current}
+              prefilledResponseData={offset === 0 ? prefillResponseData : undefined}
+              isLastBlock={block.id === localSurvey.blocks[localSurvey.blocks.length - 1].id}
+              languageCode={selectedLanguage}
+              autoFocusEnabled={autoFocusEnabled}
+              isBackButtonHidden={localSurvey.isBackButtonHidden}
+              isAutoProgressingEnabled={localSurvey.isAutoProgressingEnabled}
+              onOpenExternalURL={onOpenExternalURL}
+              dir={dir}
+              fullSizeCards={fullSizeCards}
+            />
+          )
+        );
+      }
+    };
+
+    const isLanguageSwitchVisible = getShowLanguageSwitch(offset);
+    const isCloseButtonVisible = getShowSurveyCloseButton(offset);
+
+    return (
+      <AutoCloseWrapper
+        survey={localSurvey}
+        onClose={onClose}
+        questionIdx={blockIdx} // Now tracks block index, not question index
+        hasInteracted={hasInteracted}
+        setHasInteracted={setHasInteracted}>
+        <div
+          className={cn(
+            "no-scrollbar bg-survey-bg flex h-full w-full flex-col justify-between overflow-hidden transition-opacity duration-1000 ease-in-out",
+            offset === 0 || cardArrangement === "simple" ? "opacity-100" : "opacity-0"
+          )}>
+          <div className={cn("relative")}>
+            <div className="flex w-full flex-col items-end">
+              {showProgressBar ? <ProgressBar survey={localSurvey} blockId={blockId} /> : null}
+
+              <div
+                className={cn(
+                  "relative w-full",
+                  isCloseButtonVisible || isLanguageSwitchVisible ? "h-8" : "h-5"
+                )}>
+                <div className={cn("flex w-full items-center justify-end")}>
+                  {isLanguageSwitchVisible && (
+                    <LanguageSwitch
+                      survey={localSurvey}
+                      surveyLanguages={localSurvey.languages}
+                      setSelectedLanguageCode={setSelectedLanguage}
+                      hoverColor={styling.inputColor?.light ?? "#f8fafc"}
+                      borderRadius={styling.roundness ?? 8}
+                      setDir={setDir}
+                      dir={dir}
+                    />
+                  )}
+                  {isLanguageSwitchVisible && isCloseButtonVisible && (
+                    <div aria-hidden="true" className="z-1001 h-5 w-px bg-slate-200" />
+                  )}
+
+                  {isCloseButtonVisible && (
+                    <SurveyCloseButton
+                      onClose={onClose}
+                      hoverColor={styling.inputColor?.light ?? "#f8fafc"}
+                      borderRadius={styling.roundness ?? 8}
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+            <div
+              ref={contentRef}
+              className={cn(
+                loadingElement ? "animate-pulse opacity-60" : "",
+                fullSizeCards ? "" : "my-auto"
+              )}>
+              {content()}
+            </div>
+
+            <div
+              className={cn(
+                "flex flex-col justify-center gap-2",
+                isCloseButtonVisible || isLanguageSwitchVisible ? "p-2" : "p-3"
+              )}>
+              {isBrandingEnabled ? <FormbricksBranding /> : null}
+              {isSpamProtectionEnabled ? <RecaptchaBranding /> : null}
+            </div>
+          </div>
+        </div>
+      </AutoCloseWrapper>
+    );
+  };
+
+  return (
+    <StackedCardsContainer
+      cardArrangement={cardArrangement}
+      currentBlockId={blockId}
+      getCardContent={getCardContent}
+      survey={localSurvey}
+      styling={styling}
+      setBlockId={setBlockId}
+      shouldResetBlockId={shouldResetQuestionId}
+      fullSizeCards={fullSizeCards}
+      placement={placement}
+    />
+  );
+}

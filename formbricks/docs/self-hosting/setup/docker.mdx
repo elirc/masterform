@@ -1,0 +1,407 @@
+---
+title: "Docker Setup"
+description: "Set up Formbricks quickly using our ready-to-use Docker image."
+icon: "docker"
+---
+
+The image is pre-built and requires minimal setup—just download it and start the container.
+
+### Requirements
+
+Make sure Docker and Docker Compose are installed on your system. These are usually included in tools like Docker Desktop and Rancher Desktop.
+
+<Note>
+  `docker compose` without the hyphen is now the primary method of using docker-compose, according to the
+  Docker documentation.
+</Note>
+
+## Start
+
+1. **Create a New Directory for Formbricks**
+
+   Open a terminal and run the following commands to create and enter a new directory for Formbricks:
+
+   ```bash
+   mkdir formbricks-quickstart && cd formbricks-quickstart
+   ```
+
+1. **Download the Docker-Compose File**
+
+   Get the docker-compose file from the Formbricks repository by running:
+
+   ```bash
+   curl -o docker-compose.yml https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/docker-compose.yml
+   ```
+
+1. **Generate NextAuth Secret**
+
+   You need a NextAuth secret for session signing and encryption. Run one of the commands below based on your operating system:
+
+   For Linux:
+
+   ```bash
+   sed -i "/NEXTAUTH_SECRET:$/s/NEXTAUTH_SECRET:.*/NEXTAUTH_SECRET: $(openssl rand -hex 32)/" docker-compose.yml
+   ```
+
+   For macOS:
+
+   ```bash
+   sed -i '' "s/NEXTAUTH_SECRET:.*/NEXTAUTH_SECRET: $(openssl rand -hex 32)/" docker-compose.yml
+   ```
+
+1. **Generate Encryption Key**
+
+   Next, you need to generate an Encryption Key. This will be used for authenticating and verifying 2 Factor Authentication. Run one of the commands below based on your operating system:
+
+   For Linux:
+
+   ```bash
+   sed -i "/ENCRYPTION_KEY:$/s/ENCRYPTION_KEY:.*/ENCRYPTION_KEY: $(openssl rand -hex 32)/" docker-compose.yml
+   ```
+
+   For macOS:
+
+   ```bash
+   sed -i '' "s/ENCRYPTION_KEY:.*/ENCRYPTION_KEY: $(openssl rand -hex 32)/" docker-compose.yml
+   ```
+
+1. **Generate Cron Secret**
+
+   You require a Cron secret to secure API access for running cron jobs. Run one of the commands below based on your operating system:
+
+   For Linux:
+
+   ```bash
+   sed -i "/CRON_SECRET:$/s/CRON_SECRET:.*/CRON_SECRET: $(openssl rand -hex 32)/" docker-compose.yml
+   ```
+
+   For macOS:
+
+   ```bash
+   sed -i '' "s/CRON_SECRET:.*/CRON_SECRET: $(openssl rand -hex 32)/" docker-compose.yml
+   ```
+
+1. **Start the Docker Setup**
+
+   Now, you're ready to run Formbricks with Docker. Use the command below to start Formbricks along with a PostgreSQL database using Docker Compose:
+
+   ```bash
+   docker compose up -d
+   ```
+
+   The `-d` flag runs the containers in the background, so they keep running even after you close the terminal.
+
+1. **Open Formbricks in Your Browser**
+
+   Once the setup is running, open [**http://localhost:3000**](http://localhost:3000) in your browser to access Formbricks. The first time you visit, you'll see a setup wizard. Follow the steps to create your first user and start using Formbricks.
+
+## Update
+
+Please take a look at our [migration guide](/self-hosting/advanced/migration) for version specific steps to update Formbricks.
+
+1. Pull the latest Formbricks image
+
+   ```bash
+   docker compose pull
+   ```
+
+1. Stop the Formbricks stack
+
+   ```bash
+   docker compose down
+   ```
+
+1. Re-start the Formbricks stack with the updated image
+
+   ```bash
+   docker compose up -d
+   ```
+
+## Optional: Adding RustFS for File Storage
+
+RustFS provides S3-compatible object storage for file uploads in Formbricks. If you want to enable features
+like image uploads, survey file uploads, or custom logos, you can run RustFS alongside Formbricks while
+keeping the existing `S3_*` environment variables.
+
+<Note>
+  For a broader overview of file storage options and required environment variables, see our [File Uploads
+  Configuration](/self-hosting/configuration/file-uploads) guide.
+</Note>
+
+<Warning>
+  **For production deployments with HTTPS**, use the [one-click setup script](/self-hosting/setup/one-click)
+  which automatically configures RustFS with Traefik, SSL certificates, a dedicated `files.` subdomain, and
+  least-privilege service credentials. The examples below are best suited for development, testing, or custom
+  local setups.
+</Warning>
+
+<Warning>
+  The bundled RustFS examples on this page are convenience-oriented single-server setups. They work well for
+  development, evaluation, and smaller self-hosted deployments, but they are not the ideal RustFS architecture
+  for high-availability or larger-scale production storage. For stricter production requirements, use external
+  object storage or run a dedicated RustFS deployment separately.
+</Warning>
+
+### Quick Start: Using docker-compose.dev.yml
+
+The fastest way to test file uploads locally is to use the included `docker-compose.dev.yml`, which already
+starts RustFS and auto-creates the `formbricks` bucket.
+
+1. **Start the local stack**
+
+   From the repository root:
+
+   ```bash
+   docker compose -f docker-compose.dev.yml up -d
+   ```
+
+   This starts PostgreSQL, Valkey (Redis), Mailhog, RustFS, a permissions helper, and a one-time bucket
+   bootstrap job.
+
+2. **Access the RustFS console**
+
+   Open http://localhost:9001 in your browser and sign in with:
+   - Username: `devrustfs`
+   - Password: `devrustfs123`
+
+3. **Configure Formbricks**
+
+   Update your `.env` file or environment variables:
+
+   ```bash
+   S3_ACCESS_KEY="devrustfs"
+   S3_SECRET_KEY="devrustfs123"
+   S3_REGION="us-east-1"
+   S3_BUCKET_NAME="formbricks"
+   S3_ENDPOINT_URL="http://localhost:9000"
+   S3_FORCE_PATH_STYLE="1"
+   ```
+
+4. **Verify uploads**
+
+   After uploading a file in Formbricks, open http://localhost:9001 and navigate to **Buckets → formbricks**
+   to confirm the object was stored successfully.
+
+<Note>
+  The development compose file also runs a `rustfs-init` job so you do not need to create the bucket manually.
+</Note>
+
+### Manual RustFS Setup (Custom Configuration)
+
+<Note>
+  <strong>Recommended:</strong> Prefer <code>docker-compose.dev.yml</code> for local development unless you
+  need to fold RustFS into an existing custom Compose stack.
+</Note>
+
+If you want to add RustFS to your own `docker-compose.yml`, use a pinned RustFS image plus two helper
+services:
+
+```yaml
+services:
+  rustfs-perms:
+    image: busybox:1.36.1
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /data && chown -R 10001:10001 /data"]
+    volumes:
+      - rustfs-data:/data
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-alpha.93
+    restart: always
+    depends_on:
+      rustfs-perms:
+        condition: service_completed_successfully
+    command: /data
+    environment:
+      RUSTFS_ACCESS_KEY: "${FORMBRICKS_RUSTFS_ADMIN_USER}"
+      RUSTFS_SECRET_KEY: "${FORMBRICKS_RUSTFS_ADMIN_PASSWORD}"
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+
+  rustfs-init:
+    image: minio/mc@sha256:95b5f3f7969a5c5a9f3a700ba72d5c84172819e13385aaf916e237cf111ab868
+    depends_on:
+      - rustfs
+    environment:
+      RUSTFS_ADMIN_USER: "${FORMBRICKS_RUSTFS_ADMIN_USER}"
+      RUSTFS_ADMIN_PASSWORD: "${FORMBRICKS_RUSTFS_ADMIN_PASSWORD}"
+      RUSTFS_SERVICE_USER: "${FORMBRICKS_RUSTFS_SERVICE_USER}"
+      RUSTFS_SERVICE_PASSWORD: "${FORMBRICKS_RUSTFS_SERVICE_PASSWORD}"
+      RUSTFS_BUCKET_NAME: "${FORMBRICKS_RUSTFS_BUCKET_NAME}"
+      RUSTFS_POLICY_NAME: "${FORMBRICKS_RUSTFS_POLICY_NAME}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        until mc alias set rustfs http://rustfs:9000 "$RUSTFS_ADMIN_USER" "$RUSTFS_ADMIN_PASSWORD" >/dev/null 2>&1 \
+          && mc ls rustfs >/dev/null 2>&1; do
+          sleep 2
+        done
+        mc mb rustfs/"$RUSTFS_BUCKET_NAME" --ignore-existing
+        cat > /tmp/formbricks-policy.json << EOF
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"],
+              "Resource": ["arn:aws:s3:::$RUSTFS_BUCKET_NAME/*"]
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["s3:ListBucket"],
+              "Resource": ["arn:aws:s3:::$RUSTFS_BUCKET_NAME"]
+            }
+          ]
+        }
+        EOF
+        if ! mc admin policy info rustfs "$RUSTFS_POLICY_NAME" >/dev/null 2>&1; then
+          mc admin policy create rustfs "$RUSTFS_POLICY_NAME" /tmp/formbricks-policy.json || \
+            mc admin policy add rustfs "$RUSTFS_POLICY_NAME" /tmp/formbricks-policy.json
+        fi
+        if ! mc admin user info rustfs "$RUSTFS_SERVICE_USER" >/dev/null 2>&1; then
+          mc admin user add rustfs "$RUSTFS_SERVICE_USER" "$RUSTFS_SERVICE_PASSWORD"
+        fi
+        mc admin policy attach rustfs "$RUSTFS_POLICY_NAME" --user "$RUSTFS_SERVICE_USER"
+```
+
+Declare the corresponding volume:
+
+```yaml
+volumes:
+  rustfs-data:
+    driver: local
+```
+
+Store the generated RustFS credentials in a local `.env` file next to your `docker-compose.yml` instead of
+hardcoding them in Compose:
+
+```bash
+FORMBRICKS_RUSTFS_ADMIN_USER=formbricks-root
+FORMBRICKS_RUSTFS_ADMIN_PASSWORD=change-this-secure-password
+FORMBRICKS_RUSTFS_SERVICE_USER=formbricks-service
+FORMBRICKS_RUSTFS_SERVICE_PASSWORD=change-this-service-password
+FORMBRICKS_RUSTFS_BUCKET_NAME=formbricks
+FORMBRICKS_RUSTFS_POLICY_NAME=formbricks-policy
+FORMBRICKS_RUSTFS_REGION=us-east-1
+```
+
+Then configure Formbricks to use the RustFS service credentials:
+
+```bash
+S3_ACCESS_KEY="${FORMBRICKS_RUSTFS_SERVICE_USER}"
+S3_SECRET_KEY="${FORMBRICKS_RUSTFS_SERVICE_PASSWORD}"
+S3_REGION="${FORMBRICKS_RUSTFS_REGION}"
+S3_BUCKET_NAME="${FORMBRICKS_RUSTFS_BUCKET_NAME}"
+S3_ENDPOINT_URL="http://rustfs:9000"
+S3_FORCE_PATH_STYLE="1"
+```
+
+<Note>
+  Restrict the `.env` file to `0600` and do not commit it to source control. For production, prefer the
+  [one-click setup script](/self-hosting/setup/one-click), which creates a separate least-privilege service
+  account automatically.
+</Note>
+
+#### Tips & Common Gotchas
+
+- **Permission denied on `/data`**: Ensure the mounted directory or volume is owned by UID `10001`. The
+  `rustfs-perms` helper handles this for Compose-managed volumes.
+- **Storage medium matters**: Prefer local SSD or NVMe storage for `rustfs-data`, use XFS on dedicated
+  host-managed disks where possible, and avoid NFS or other network filesystems for RustFS data.
+- **Connection refused**: Ensure the `rustfs` container is running and port `9000` is reachable from the
+  Formbricks container.
+- **Bucket not found**: Confirm that `rustfs-init` completed successfully or create the bucket manually with
+  `mc`.
+- **Auth failed**: Confirm that `S3_ACCESS_KEY` and `S3_SECRET_KEY` match the RustFS credentials configured on
+  the server.
+- **Backups**: Back up the `rustfs-data` volume regularly, especially for single-server deployments.
+- **Console exposure**: Do not expose the RustFS console port publicly in production. Keep it on a private
+  network or behind admin-only controls.
+- **Health check**: From the Formbricks container:
+
+  ```bash
+  docker compose exec formbricks sh -c 'wget -O- http://rustfs:9000/health'
+  ```
+
+### Production Setup with Traefik
+
+For production deployments, use the [one-click setup script](/self-hosting/setup/one-click), which
+automatically configures:
+
+- RustFS behind Traefik on a dedicated `files.yourdomain.com` subdomain
+- Automatic SSL certificate generation via Let's Encrypt
+- CORS configuration scoped to your Formbricks domain
+- Rate limiting middleware
+- Separate RustFS admin and Formbricks service credentials
+- A `rustfs-init` job that creates the bucket and access policy
+
+The production setup from [formbricks.sh](https://github.com/formbricks/formbricks/blob/main/docker/formbricks.sh)
+adds the reverse proxy wiring and bootstrap automation needed for long-lived deployments.
+
+<Note>
+  Even in the one-click flow, bundled RustFS remains a convenience-oriented single-server deployment. For
+  higher availability, stricter operational requirements, or larger storage footprints, prefer external object
+  storage or a dedicated RustFS deployment managed separately from Formbricks.
+</Note>
+
+## Debug
+
+If you encounter any issues, you can check the logs of the container with this command:
+
+```bash
+docker compose logs -f
+```
+
+In an ideal case, you should see this:
+
+```bash
+[+] Running 9/16
+⠹ formbricks 15 layers [⣿⣤⣿⣿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀] 29.78MB/47.76MB Pulling                                                           13.3s
+✔ 7264a8db6415 Already exists                                                                                                 0.0s
+⠋ 751194035c36 Downloading    [===============================>                   ]  29.78MB/47.76...                         8.1s
+✔ eff5dce73b38 Download complete                                                                                              1.7s
+✔ c8ce5be43019 Download complete                                                                                              1.2s
+✔ a2f33c630af5 Download complete                                                                                              5.1s
+✔ e3b64e437860 Download complete                                                                                              3.3s
+✔ a6551ac5f976 Download complete                                                                                              4.9s
+✔ 4f4fb700ef54 Download complete                                                                                              6.0s
+✔ 22163889e16b Download complete                                                                                              6.7s
+✔ dc647bb9eb13 Download complete                                                                                              7.8s
+⠋ 49c2ad494720 Waiting                                                                                                        8.1s
+⠋ 5c797a842dcb Waiting                                                                                                        8.1s
+⠋ 1f231213db04 Waiting                                                                                                        8.1s
+⠋ e407294bdcda Waiting                                                                                                        8.1s
+⠋ 6fd8358dca47 Pulling fs layer                                                                                               8.1s
+
+[+] Running 2/2
+✔ Container formbricks-quickstart-postgres-1    Created                                                                       0.0s
+✔ Container formbricks-quickstart-formbricks-1  Created                                                                       0.0s
+```
+
+And at the tail of the output, you should see this:
+
+```bash
+formbricks-quickstart-formbricks-1  | All migrations have been successfully applied.
+formbricks-quickstart-formbricks-1  |
+formbricks-quickstart-formbricks-1  | - info Loaded env from /home/nextjs/apps/web/.env
+formbricks-quickstart-formbricks-1  | Listening on port 3000 url: http://<random-string>:3000
+```
+
+You can close the logs again by hitting `CTRL + C`.
+
+<Note>
+  **Customizing environment variables**
+
+To edit any of the available environment variables, check out our [Configuration](/self-hosting/configuration/environment-variables) section!
+
+</Note>
+
+If you have any questions or require help, feel free to reach out to us on [**GitHub Discussions**](https://github.com/formbricks/formbricks/discussions). 😃

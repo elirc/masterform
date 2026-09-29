@@ -1,0 +1,211 @@
+"use client";
+
+import { XIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import toast from "react-hot-toast";
+import { useTranslation } from "react-i18next";
+import { TOrganizationRole } from "@formbricks/types/memberships";
+import { TOrganization } from "@formbricks/types/organizations";
+import { FORMBRICKS_ENVIRONMENT_ID_LS } from "@/lib/localStorage";
+import { getAccessFlags } from "@/lib/membership/utils";
+import { getFormattedErrorMessage } from "@/lib/utils/helper";
+import { TOrganizationTeam } from "@/modules/ee/teams/team-list/types/team";
+import { inviteUserAction, leaveOrganizationAction } from "@/modules/organization/settings/teams/actions";
+import { InviteMemberModal } from "@/modules/organization/settings/teams/components/invite-member/invite-member-modal";
+import { TInvitee } from "@/modules/organization/settings/teams/types/invites";
+import { Button } from "@/modules/ui/components/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/modules/ui/components/dialog";
+
+interface OrganizationActionsProps {
+  role: TOrganizationRole;
+  membershipRole?: TOrganizationRole;
+  isLeaveOrganizationDisabled: boolean;
+  organization: TOrganization;
+  teams: TOrganizationTeam[];
+  isInviteDisabled: boolean;
+  isAccessControlAllowed: boolean;
+  isFormbricksCloud: boolean;
+  environmentId: string;
+  isMultiOrgEnabled: boolean;
+  isUserManagementDisabledFromUi: boolean;
+  isStorageConfigured: boolean;
+  isTeamAdmin: boolean;
+  userAdminTeamIds?: string[];
+  enterpriseLicenseRequestFormUrl: string;
+}
+
+export const OrganizationActions = ({
+  role,
+  organization,
+  membershipRole,
+  teams,
+  isLeaveOrganizationDisabled,
+  isInviteDisabled,
+  isAccessControlAllowed,
+  isFormbricksCloud,
+  environmentId,
+  isMultiOrgEnabled,
+  isUserManagementDisabledFromUi,
+  isStorageConfigured,
+  isTeamAdmin,
+  userAdminTeamIds,
+  enterpriseLicenseRequestFormUrl,
+}: OrganizationActionsProps) => {
+  const router = useRouter();
+  const { t } = useTranslation();
+  const [isLeaveOrganizationModalOpen, setIsLeaveOrganizationModalOpen] = useState(false);
+  const [isInviteMemberModalOpen, setIsInviteMemberModalOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const { isOwner, isManager } = getAccessFlags(membershipRole);
+  const isOwnerOrManager = isOwner || isManager;
+
+  const canInvite = isOwnerOrManager || (isAccessControlAllowed && isTeamAdmin);
+
+  const handleLeaveOrganization = async () => {
+    setLoading(true);
+    try {
+      const result = await leaveOrganizationAction({ organizationId: organization.id });
+      if (result?.serverError) {
+        toast.error(getFormattedErrorMessage(result));
+        setLoading(false);
+        return;
+      }
+      toast.success(t("environments.settings.general.member_deleted_successfully"));
+      router.refresh();
+      setLoading(false);
+      localStorage.removeItem(FORMBRICKS_ENVIRONMENT_ID_LS);
+      router.push("/");
+    } catch (err) {
+      toast.error(`Error: ${err instanceof Error ? err.message : "Unknown error occurred"}`);
+      setLoading(false);
+    }
+  };
+
+  const handleAddMembers = async (data: TInvitee[]) => {
+    if (data.length === 1) {
+      // Individual invite
+      const inviteUserActionResult = await inviteUserAction({
+        organizationId: organization.id,
+        email: data[0].email.toLowerCase(),
+        name: data[0].name,
+        role: data[0].role,
+        teamIds: data[0].teamIds,
+      });
+      if (inviteUserActionResult?.data) {
+        router.refresh();
+        toast.success(t("environments.settings.general.member_invited_successfully"));
+      } else {
+        const errorMessage = getFormattedErrorMessage(inviteUserActionResult);
+        toast.error(errorMessage);
+      }
+    } else {
+      const inviteResults: { email: string; success: boolean }[] = [];
+      for (const { name, email, role, teamIds } of data) {
+        const inviteUserActionResult = await inviteUserAction({
+          organizationId: organization.id,
+          email: email.toLowerCase(),
+          name,
+          role,
+          teamIds,
+        });
+        inviteResults.push({
+          email,
+          success: Boolean(inviteUserActionResult?.data),
+        });
+      }
+      const failedInvites: string[] = [];
+      const successInvites: string[] = [];
+      inviteResults.forEach((invite) => {
+        if (!invite.success) {
+          failedInvites.push(invite.email);
+        } else {
+          successInvites.push(invite.email);
+        }
+      });
+      if (failedInvites.length > 0) {
+        toast.error(`${failedInvites.length} ${t("environments.settings.general.invites_failed")}`);
+      }
+      if (successInvites.length > 0) {
+        toast.success(
+          `${successInvites.length} ${t("environments.settings.general.member_invited_successfully")}`
+        );
+      }
+    }
+  };
+
+  return (
+    <>
+      <div className="mb-4 flex justify-end space-x-2 text-right">
+        {role !== "owner" && isMultiOrgEnabled && (
+          <Button variant="destructive" size="sm" onClick={() => setIsLeaveOrganizationModalOpen(true)}>
+            {t("environments.settings.general.leave_organization")}
+            <XIcon />
+          </Button>
+        )}
+
+        {!isInviteDisabled && canInvite && !isUserManagementDisabledFromUi && (
+          <Button
+            size="sm"
+            variant="default"
+            onClick={() => {
+              setIsInviteMemberModalOpen(true);
+            }}>
+            {t("environments.settings.teams.invite_member")}
+          </Button>
+        )}
+      </div>
+      <InviteMemberModal
+        open={isInviteMemberModalOpen}
+        setOpen={setIsInviteMemberModalOpen}
+        onSubmit={handleAddMembers}
+        membershipRole={membershipRole}
+        isAccessControlAllowed={isAccessControlAllowed}
+        isFormbricksCloud={isFormbricksCloud}
+        environmentId={environmentId}
+        teams={teams}
+        isStorageConfigured={isStorageConfigured}
+        isOwnerOrManager={isOwnerOrManager}
+        isTeamAdmin={isTeamAdmin}
+        userAdminTeamIds={userAdminTeamIds}
+        enterpriseLicenseRequestFormUrl={enterpriseLicenseRequestFormUrl}
+      />
+
+      <Dialog open={isLeaveOrganizationModalOpen} onOpenChange={setIsLeaveOrganizationModalOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("environments.settings.general.leave_organization_title")}</DialogTitle>
+            <DialogDescription>
+              {t("environments.settings.general.leave_organization_description")}
+            </DialogDescription>
+          </DialogHeader>
+          {isLeaveOrganizationDisabled && (
+            <p className="mt-2 text-sm text-red-700">
+              {t("environments.settings.general.cannot_leave_only_organization")}
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setIsLeaveOrganizationModalOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleLeaveOrganization}
+              loading={loading}
+              disabled={isLeaveOrganizationDisabled}>
+              {t("environments.settings.general.leave_organization_ok_btn_text")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+};
