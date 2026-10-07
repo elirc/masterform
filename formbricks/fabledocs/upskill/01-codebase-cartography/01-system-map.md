@@ -2,7 +2,7 @@
 
 ## Shape: pnpm + Turborepo monorepo
 
-Workspaces (`pnpm-workspace.yaml`): `apps/*` + `packages/*`. Task graph in `turbo.json`; root scripts in `package.json:12-53`.
+Workspaces (`pnpm-workspace.yaml`): `apps/*` + `packages/*`. Task graph in `turbo.json`; root scripts in `package.json:12-47`.
 
 ```
 formbricks/

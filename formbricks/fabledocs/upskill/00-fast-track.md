@@ -4,7 +4,7 @@ Goal: by Sunday night you can run the app, trace two end-to-end flows aloud, and
 
 ## 1. Install and run (Saturday morning)
 
-All commands are from the repo root. They come from `package.json:12-53` and `AGENTS.md` — marked __inferred__ (read from the repo's own scripts and docs, not executed during authoring; this machine had no running Docker daemon).
+All commands are from the repo root. They come from `package.json:12-47` and `AGENTS.md` — marked __inferred__ (read from the repo's own scripts and docs, not executed during authoring; this machine had no running Docker daemon).
 
 ```bash
 pnpm install              # inferred — installs the whole workspace

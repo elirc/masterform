@@ -5,7 +5,7 @@
 - **pnpm** workspaces (`pnpm-workspace.yaml`); note `onlyBuiltDependencies` allow-lists which packages may run postinstall builds (sharp, esbuild, prisma) — pnpm v10 blocks the rest for supply-chain safety. That's a security control worth naming in interviews.
 - **Turborepo** (`turbo.json`) orchestrates `build`/`dev`/`test` across the graph with caching. The cache is why `AGENTS.md` tells you to use `--force` when iterating on `packages/surveys` — stale cache + copied bundle = invisible changes.
 
-## Commands that matter (all __inferred__ from `package.json:12-53` + `AGENTS.md`; see cheatsheet for the full table)
+## Commands that matter (all __inferred__ from `package.json:12-47` + `AGENTS.md`; see cheatsheet for the full table)
 
 | Intent | Command |
 | --- | --- |

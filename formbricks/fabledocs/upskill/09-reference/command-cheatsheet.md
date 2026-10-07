@@ -1,6 +1,6 @@
 # Command Cheatsheet
 
-All commands from root unless noted. **Every command below is __inferred__** from `package.json:12-53`, `AGENTS.md`, and workspace configs — none were executed during authoring (no Docker daemon on the authoring machine). Verify the first time you run each; correct this file where reality differs.
+All commands from root unless noted. **Every command below is __inferred__** from `package.json:12-47`, `AGENTS.md`, and workspace configs — none were executed during authoring (no Docker daemon on the authoring machine). Verify the first time you run each; correct this file where reality differs.
 
 ## Setup & daily
 

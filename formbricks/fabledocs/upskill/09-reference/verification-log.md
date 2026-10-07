@@ -1,6 +1,8 @@
 # Verification Log
 
-Running record of what was inspected while authoring this curriculum. Date: 2026-07-11. Environment: Windows 11, repo working tree at `masterform/formbricks` (no local `.git` directory found in the repo root — an outer home-directory git repo shadows it, so git history was NOT used; all claims come from the working tree).
+Running record of what was inspected while authoring this curriculum. Date: 2026-07-11. Environment: Windows 11, app directory `formbricks/` (no `.git` of its own at the time, so git history was NOT used; all claims come from the working tree).
+
+> **Status note (2026-10-06, frozen record).** Kept as written for the 2026-07-11 pass. The repository now has its own git history (a single snapshot commit, so still no upstream archaeology). A static re-check on 2026-10-06 (no installs, Docker, builds or tests) confirmed the inventory below still holds: 15 packages, 36 Prisma models in a 1,070-line schema with `Response` at :158 and `Survey` at :344, 378 colocated `*.test.ts(x)` files in `apps/web`, 20 workflow files, 23 Playwright `*.spec.ts` files (the "14+" below is a floor), and the "full" file sizes for the v2 responses route, pipeline route, storage route, action client and rate limiter. Sampled fast-track anchors (geo headers at `responses/route.ts:37-41`, `POST` at :204, pipeline send at :245, cron-secret check at `(internal)/pipeline/route.ts:31-36`, webhook `.catch` at :174-176, `sendToPipeline` catch at `pipelines.ts:22-24`) still point at the described code. One correction: the root `package.json` `scripts` block ends at L47, so `package.json:12-53` was narrowed to `:12-47` across the curriculum.
 
 ## Commands run (verified)
 
@@ -17,7 +19,7 @@ Running record of what was inspected while authoring this curriculum. Date: 2026
 
 ## Commands NOT run (inferred only)
 
-`pnpm install`, `pnpm db:up`, `pnpm dev`, `pnpm test`, `pnpm test:e2e`, `pnpm lint`, `pnpm build`, `pnpm db:migrate:dev`. Reason: authoring environment had no running Docker daemon and the task is docs-only. All are documented in `package.json:12-53` and `AGENTS.md` and are labeled __inferred__ wherever cited.
+`pnpm install`, `pnpm db:up`, `pnpm dev`, `pnpm test`, `pnpm test:e2e`, `pnpm lint`, `pnpm build`, `pnpm db:migrate:dev`. Reason: authoring environment had no running Docker daemon and the task is docs-only. All are documented in `package.json:12-47` and `AGENTS.md` and are labeled __inferred__ wherever cited.
 
 ## Files read in full or in large part (anchors written from these reads)
 
